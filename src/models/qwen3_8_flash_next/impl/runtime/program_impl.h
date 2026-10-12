@@ -11431,8 +11431,11 @@ void ProgramImplCore::prepare_graphs() {
                     profile.batch_size             = batch_size;
                     profile.min_execution_frontier = planned.min;
                     profile.max_execution_frontier = planned.max;
-                    profile.topology_class =
-                        planned.topology_class * max_concurrency + (batch_size - 1U);
+                    // Local fix: envelope variants of one planned class are not update-
+                    // compatible at batch sizes > 2 (node sets differ), so assign a unique
+                    // topology per profile: instantiate instead of cudaGraphExecUpdate.
+                    profile.topology_class         = static_cast<std::uint32_t>(
+                        graphs.profiles.size() - 1);
                     schedule::capture_mtp_decode_batch(
                         mtp_state, static_cast<std::int32_t>(batch_size), drafts,
                         mtp_causal_attention_envelopes(planned.max, drafts, capacity),
