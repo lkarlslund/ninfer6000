@@ -23,6 +23,10 @@ if(NINFER_PERFORMANCE_TRACE)
   ninfer_add_test(ninfer_performance_trace_fixture
     SOURCES performance_trace_fixture.cu LIBRARIES ninfer_ops)
 endif()
+ninfer_add_test(ninfer_qwen3_8_flash_next_tool_call_parser_test
+  SOURCES test_tool_call_parser.cpp LIBRARIES ninfer_engine ninfer::json)
+target_compile_definitions(ninfer_qwen3_8_flash_next_tool_call_parser_test
+  PRIVATE NINFER_TOOL_CALL_PARSER_FLASH_NEXT)
 ninfer_add_test(ninfer_qwen3_8_flash_next_frontend_test
   SOURCES models/qwen3_8_flash_next/test_frontend.cpp LIBRARIES ninfer_model_runtime)
 set_tests_properties(ninfer_qwen3_8_flash_next_frontend_test PROPERTIES SKIP_RETURN_CODE 77)

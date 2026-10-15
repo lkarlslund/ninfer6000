@@ -1,4 +1,8 @@
-#include "models/qwen3_5/frontend/tool_call_parser.h"
+#ifdef NINFER_TOOL_CALL_PARSER_FLASH_NEXT
+#    include "models/qwen3_8_flash_next/impl/frontend/tool_call_parser.h"
+#else
+#    include "models/qwen3_5/frontend/tool_call_parser.h"
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -13,8 +17,12 @@
 
 namespace {
 
-using Json   = nlohmann::json;
+using Json = nlohmann::json;
+#ifdef NINFER_TOOL_CALL_PARSER_FLASH_NEXT
+namespace fi = ninfer::models::qwen3_8_flash_next::frontend_internal;
+#else
 namespace fi = ninfer::models::qwen3_5::frontend;
+#endif
 
 const fi::ToolCallOutputContract kLegacyContract;
 
@@ -35,9 +43,9 @@ std::string tool_definition(const std::string& tool_name, Json properties,
 }
 
 std::shared_ptr<const fi::ToolCallOutputContract>
-contract_from_definitions(const std::vector<std::string>& definitions) {
+contract_from_definitions(const std::vector<std::string>& definitions, bool repair_markup = false) {
     return fi::build_tool_call_output_contract(
-        std::span<const std::string>(definitions.data(), definitions.size()), true);
+        std::span<const std::string>(definitions.data(), definitions.size()), true, repair_markup);
 }
 
 std::shared_ptr<const fi::ToolCallOutputContract> output_contract_for(const std::string& tool_name,
@@ -636,6 +644,86 @@ int test_conflicting_duplicate_tool_contracts_use_legacy_normalization() {
     return failures;
 }
 
+// Model slips captured from served agent sessions, each with a single reading.
+int test_repaired_function_openers() {
+    const std::vector<std::string> definitions = {
+        tool_definition("exec_command", Json{{"cmd", Json{{"type", "string"}}},
+                                             {"timeout_ms", Json{{"type", "integer"}}}}),
+        tool_definition("web_search", Json{{"query", Json{{"type", "string"}}},
+                                           {"limit", Json{{"type", "integer"}}}})};
+    const auto contract = contract_from_definitions(definitions, true);
+    int failures        = 0;
+
+    const std::string parameter_opener = "<tool_call>\n<parameter=exec_command>\n<parameter=cmd>\n"
+                                         "ls -la\n</parameter>\n<parameter=timeout_ms>\n60000\n"
+                                         "</parameter>\n</function>\n</tool_call>";
+    const auto parsed = fi::parse_qwen_tool_call_output(parameter_opener, 64, *contract);
+    failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1 &&
+                          parsed.diagnostics.repaired_markup == 1,
+                      "parameter-style function opener was not repaired");
+    if (parsed.tool_calls.size() == 1) {
+        const Json args = Json::parse(parsed.tool_calls.front().arguments_json);
+        failures += check(parsed.tool_calls.front().name == "exec_command" &&
+                              args == Json{{"cmd", "ls -la"}, {"timeout_ms", 60000}},
+                          "repaired parameter-style opener changed the call");
+    }
+
+    const std::string bare_opener = tool_call("web_search", {{"limit", "8"}, {"query", "xpeng"}}) +
+                                    "\n<tool_call>\n<exec_command>\n<parameter=cmd>\ncurl -sL x\n"
+                                    "</parameter>\n</function>\n</tool_call>";
+    const auto bare               = fi::parse_qwen_tool_call_output(bare_opener, 64, *contract);
+    failures +=
+        check(bare.is_tool_call_response && bare.tool_calls.size() == 2 &&
+                  bare.diagnostics.repaired_markup == 1 &&
+                  bare.tool_calls.back().name == "exec_command" &&
+                  Json::parse(bare.tool_calls.back().arguments_json) == Json{{"cmd", "curl -sL x"}},
+              "bare function opener after a valid call was not repaired");
+
+    const std::string undeclared = "<tool_call>\n<parameter=exec_string>\n<parameter=cmd>\nls\n"
+                                   "</parameter>\n</function>\n</tool_call>";
+    failures += check_rejected(undeclared, *contract,
+                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
+                               "opener repair accepted an undeclared tool");
+
+    failures += check_rejected(parameter_opener, *contract_from_definitions(definitions),
+                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
+                               "opener repair ran without being enabled");
+
+    const std::string legacy = "<tool_call>\n<get_weather>\n</function>\n</tool_call>";
+    failures += check_rejected(legacy, kLegacyContract,
+                               ninfer::ToolCallParseFallbackReason::MalformedStructure,
+                               "opener repair ran without a declared tool set");
+    return failures;
+}
+
+int test_identical_duplicate_parameter_is_kept_once() {
+    const std::vector<std::string> definitions = {
+        tool_definition("tasks", Json{{"action", Json{{"type", "string"}}},
+                                      {"milestone_key", Json{{"type", "string"}}},
+                                      {"items", Json{{"type", "array"}}}})};
+    const fi::ToolCallOutputContract contract = *contract_from_definitions(definitions, true);
+    const std::string text =
+        "<tool_call>\n<function=tasks>\n<parameter=action>\ncreate\n</parameter>\n"
+        "<parameter=milestone_key>\nM001\n</parameter>\n<parameter=items>\n"
+        "[{\"content\": \"M1\"}]\n</parameter>\n<parameter=milestone_key>\nM001\n</parameter>\n"
+        "</function>\n</tool_call>";
+    const auto parsed = fi::parse_qwen_tool_call_output(text, 64, contract);
+    int failures      = 0;
+    failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1 &&
+                          parsed.diagnostics.repaired_markup == 1,
+                      "identical duplicate parameter was not merged");
+    if (parsed.tool_calls.size() == 1) {
+        failures +=
+            check(parsed.tool_calls.front().arguments_json ==
+                      R"({"action":"create","milestone_key":"M001","items":[{"content": "M1"}]})",
+                  "merged duplicate parameter changed the arguments");
+    }
+    failures += check_rejected(text, *contract_from_definitions(definitions),
+                               ninfer::ToolCallParseFallbackReason::DuplicateParameter,
+                               "duplicate merge ran without being enabled");
+    return failures;
+}
+
 int test_all_or_nothing_structural_commit() {
     const auto contract    = contract_for("configure", Json{{"flag", Json{{"type", "boolean"}}}});
     const std::string text = tool_call("configure", {{"flag", "true"}}) +
@@ -754,6 +842,8 @@ int main() {
     failures += test_strict_structure_and_active_tool_set();
     failures += test_name_limits_and_non_strict_omissions();
     failures += test_conflicting_duplicate_tool_contracts_use_legacy_normalization();
+    failures += test_repaired_function_openers();
+    failures += test_identical_duplicate_parameter_is_kept_once();
     failures += test_all_or_nothing_structural_commit();
     failures += test_incremental_valid_and_boolean();
     failures += test_incremental_fallback_preserves_bytes();

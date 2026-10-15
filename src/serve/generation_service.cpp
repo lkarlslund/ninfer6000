@@ -330,6 +330,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                 return acquire_media(part, prepared.lifetime->deadline, is_cancelled,
                                      remaining_media_bytes);
             });
+        input.options.repair_tool_call_markup = options_.repair_tool_markup;
         std::vector<PromptCacheMarker> protocol_markers = std::move(input.context_cache.markers);
         const bool protocol_allows_engine_automatic =
             input.context_cache.allow_engine_automatic_shared_prefixes;

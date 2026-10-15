@@ -348,6 +348,8 @@ struct ToolCallParseDiagnostics {
     std::uint32_t structured_call_count         = 0;
     std::uint32_t empty_arguments_omitted       = 0;
     std::uint32_t schema_mismatch_arguments     = 0;
+    // Committed calls whose function opener or repeated identical parameter was repaired.
+    std::uint32_t repaired_markup               = 0;
     ToolCallParseFallbackReason fallback_reason = ToolCallParseFallbackReason::None;
 
     [[nodiscard]] friend constexpr bool
@@ -427,6 +429,8 @@ struct PromptOptions {
     std::string chat_template_kwargs_json;
     bool add_vision_id = false;
     std::vector<std::string> tool_jsons;
+    // Repair tool-call markup slips with a single reading instead of returning them as text.
+    bool repair_tool_call_markup = false;
 };
 
 enum class CacheRetentionHint : std::uint8_t {

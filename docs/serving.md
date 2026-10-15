@@ -583,7 +583,11 @@ Function arguments use `response.function_call_arguments.delta` and `.done`. IDs
 and content indices remain stable, and concatenated deltas equal the terminal Item. Responses SSE
 does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary answer text still
 streams immediately; only an ambiguous `<tool_call>` suffix or the structured tool region is held.
-Malformed tool markup is flushed back as ordinary text without losing bytes.
+Malformed tool markup is flushed back as ordinary text without losing bytes. With
+`--repair-tool-markup`, two model slips with a single reading are repaired instead: a call opened
+with `<parameter=NAME>` or `<NAME>` in place of `<function=NAME>` when `NAME` is a declared tool,
+and a parameter repeated with an identical value. A repeated parameter with a different value, or an
+undeclared tool name, still returns as text.
 
 ### Local response state and resources
 
@@ -800,6 +804,11 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
 | `--cors` | permissive browser CORS headers | off |
+| `--repair-tool-markup` | repair tool calls opened as `<parameter=NAME>` or `<NAME>` for a declared tool, and parameters repeated with an identical value, instead of returning them as text | off |
+| `--chat-template FILE` | local Jinja chat template (Qwen3.5 family only) | artifact template |
+| `--capture-path DIR` | enable activation-capture storage in `DIR` | disabled |
+| `--capture-sites LIST` | comma-separated capture sites: `prompt_last`, `completion_last` | both |
+| `--steering-pack PATH` | validate and activate a steering pack at startup | none |
 | `--temperature F` | process-level temperature override | unset |
 | `--top-p F` | process-level top-p override | unset |
 | `--top-k N` | process-level top-k override (`0..20`; zero selects the top-20 cap) | unset |
@@ -870,9 +879,11 @@ unspecified. `enable_thinking` records whether the response starts in thinking m
 
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
 call count, empty non-string arguments omitted during normalization, schema-mismatched arguments
-preserved for consumer validation, and a stable text-fallback reason. Fallback reasons are `none`,
-`malformed_structure`, `duplicate_parameter`, `invalid_tool_name`, `undeclared_tool`, and
-`trailing_content`. These counters contain no tool arguments or generated text.
+preserved for consumer validation, `repaired_markup` for `--repair-tool-markup` repairs of openers
+and repeated identical parameters in committed calls, and a stable text-fallback reason. Fallback
+reasons are `none`, `malformed_structure`, `duplicate_parameter`, `invalid_tool_name`,
+`undeclared_tool`, and `trailing_content`. These counters contain no tool arguments or generated
+text.
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,

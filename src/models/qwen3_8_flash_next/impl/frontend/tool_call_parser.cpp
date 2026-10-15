@@ -413,7 +413,7 @@ public:
                          const Contract& contract)
         : text_(text), max_name_length_(max_name_length), contract_(contract) {}
 
-    FallbackReason parse(std::vector<RawToolCall>& calls) const {
+    FallbackReason parse(std::vector<RawToolCall>& calls, std::uint32_t& repairs) const {
         std::size_t pos = 0;
         for (;;) {
             skip_format_whitespace(text_, pos);
@@ -426,7 +426,7 @@ public:
             }
 
             RawToolCall call;
-            const FallbackReason failure = parse_tool_call(pos, call);
+            const FallbackReason failure = parse_tool_call(pos, call, repairs);
             if (failure != FallbackReason::None) { return failure; }
             calls.push_back(std::move(call));
         }
@@ -439,41 +439,71 @@ private:
         return true;
     }
 
-    FallbackReason parse_tool_call(std::size_t& pos, RawToolCall& call) const {
+    FallbackReason parse_tool_call(std::size_t& pos, RawToolCall& call,
+                                   std::uint32_t& repairs) const {
         if (!consume(pos, kToolOpen)) { return FallbackReason::MalformedStructure; }
         skip_format_whitespace(text_, pos);
-        const FallbackReason failure = parse_function(pos, call);
+        const FallbackReason failure = parse_function(pos, call, repairs);
         if (failure != FallbackReason::None) { return failure; }
         skip_format_whitespace(text_, pos);
         return consume(pos, kToolClose) ? FallbackReason::None : FallbackReason::MalformedStructure;
     }
 
-    FallbackReason parse_function(std::size_t& pos, RawToolCall& call) const {
-        if (!consume(pos, kFunctionOpen)) { return FallbackReason::MalformedStructure; }
-        const std::size_t name_begin = pos;
-        const std::size_t name_end   = text_.find('>', name_begin);
-        if (name_end == std::string_view::npos || name_end == name_begin) {
-            return FallbackReason::InvalidToolName;
+    // The model sometimes opens a call with `<parameter=NAME>` or `<NAME>` instead of
+    // `<function=NAME>` and still closes it with `</function>`. Neither form is otherwise valid
+    // at this position, so a declared tool name there has exactly one reading.
+    bool consume_repaired_function_open(std::size_t& pos, std::string_view& name) const {
+        if (!contract_.repair_markup || !contract_.enforce_declared_names) { return false; }
+        std::size_t name_begin = pos + 1;
+        if (starts_with_at(text_, pos, kParamOpen)) {
+            name_begin = pos + kParamOpen.size();
+        } else if (!starts_with_at(text_, pos, "<")) {
+            return false;
         }
-        call.name = text_.substr(name_begin, name_end - name_begin);
-        if (!valid_function_name(call.name, max_name_length_)) {
-            return FallbackReason::InvalidToolName;
+        const std::size_t name_end = text_.find('>', name_begin);
+        if (name_end == std::string_view::npos) { return false; }
+        const std::string_view candidate = text_.substr(name_begin, name_end - name_begin);
+        if (!valid_function_name(candidate, max_name_length_) ||
+            find_tool_contract(contract_, candidate) == nullptr) {
+            return false;
         }
-        if (contract_.enforce_declared_names &&
-            find_tool_contract(contract_, call.name) == nullptr) {
-            return FallbackReason::UndeclaredTool;
+        name = candidate;
+        pos  = name_end + 1;
+        return true;
+    }
+
+    FallbackReason parse_function(std::size_t& pos, RawToolCall& call,
+                                  std::uint32_t& repairs) const {
+        if (consume_repaired_function_open(pos, call.name)) {
+            ++repairs;
+        } else {
+            if (!consume(pos, kFunctionOpen)) { return FallbackReason::MalformedStructure; }
+            const std::size_t name_begin = pos;
+            const std::size_t name_end   = text_.find('>', name_begin);
+            if (name_end == std::string_view::npos || name_end == name_begin) {
+                return FallbackReason::InvalidToolName;
+            }
+            call.name = text_.substr(name_begin, name_end - name_begin);
+            if (!valid_function_name(call.name, max_name_length_)) {
+                return FallbackReason::InvalidToolName;
+            }
+            if (contract_.enforce_declared_names &&
+                find_tool_contract(contract_, call.name) == nullptr) {
+                return FallbackReason::UndeclaredTool;
+            }
+            pos = name_end + 1;
         }
-        pos = name_end + 1;
 
         for (;;) {
             skip_format_whitespace(text_, pos);
             if (consume(pos, kFunctionClose)) { return FallbackReason::None; }
-            const FallbackReason failure = parse_parameter(pos, call);
+            const FallbackReason failure = parse_parameter(pos, call, repairs);
             if (failure != FallbackReason::None) { return failure; }
         }
     }
 
-    FallbackReason parse_parameter(std::size_t& pos, RawToolCall& call) const {
+    FallbackReason parse_parameter(std::size_t& pos, RawToolCall& call,
+                                   std::uint32_t& repairs) const {
         if (!consume(pos, kParamOpen)) { return FallbackReason::MalformedStructure; }
         const std::size_t name_begin = pos;
         const std::size_t name_end   = text_.find('>', name_begin);
@@ -481,19 +511,29 @@ private:
             return FallbackReason::MalformedStructure;
         }
         const std::string_view name = text_.substr(name_begin, name_end - name_begin);
-        if (std::any_of(call.parameters.begin(), call.parameters.end(),
-                        [&](const RawParameter& existing) { return existing.name == name; })) {
-            return FallbackReason::DuplicateParameter;
-        }
 
         const std::size_t value_begin = name_end + 1;
         std::size_t value_end         = 0;
         if (!find_parameter_close(value_begin, value_end)) {
             return FallbackReason::MalformedStructure;
         }
-        call.parameters.push_back(RawParameter{
-            .name = name, .value = text_.substr(value_begin, value_end - value_begin)});
-        pos = value_end + kParamClose.size();
+        const std::string_view value = text_.substr(value_begin, value_end - value_begin);
+        pos                          = value_end + kParamClose.size();
+
+        // A repeated parameter is kept once when it repeats the same value; differing values
+        // have no single meaning.
+        const auto existing =
+            std::find_if(call.parameters.begin(), call.parameters.end(),
+                         [&](const RawParameter& parameter) { return parameter.name == name; });
+        if (existing != call.parameters.end()) {
+            if (!contract_.repair_markup || remove_parameter_framing_newlines(existing->value) !=
+                                                remove_parameter_framing_newlines(value)) {
+                return FallbackReason::DuplicateParameter;
+            }
+            ++repairs;
+            return FallbackReason::None;
+        }
+        call.parameters.push_back(RawParameter{.name = name, .value = value});
         return FallbackReason::None;
     }
 
@@ -583,10 +623,12 @@ ParsedToolCallOutput fallback(const std::string& text, ToolCallParseDiagnostics 
 } // namespace
 
 std::shared_ptr<const ToolCallOutputContract>
-build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled) {
+build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled,
+                                bool repair_markup) {
     if (!enabled) { return {}; }
     auto contract                    = std::make_shared<ToolCallOutputContract>();
     contract->enforce_declared_names = true;
+    contract->repair_markup          = repair_markup;
     contract->tools.reserve(tool_jsons.size());
     for (const std::string& tool_json : tool_jsons) {
         const Json definition = Json::parse(tool_json, nullptr, false);
@@ -608,9 +650,10 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
     std::vector<RawToolCall> raw_calls;
     const std::string_view tool_region = std::string_view(text).substr(first);
     const QwenToolRegionParser parser(tool_region, max_tool_name_length, contract);
-    const FallbackReason failure = parser.parse(raw_calls);
+    const FallbackReason failure = parser.parse(raw_calls, out.diagnostics.repaired_markup);
     if (failure != FallbackReason::None) {
         out.diagnostics.fallback_reason = failure;
+        out.diagnostics.repaired_markup = 0;
         return fallback(text, out.diagnostics);
     }
 

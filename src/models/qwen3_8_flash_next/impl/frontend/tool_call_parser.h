@@ -50,6 +50,8 @@ struct ToolCallOutputContract {
 
     std::vector<Tool> tools;
     bool enforce_declared_names = false;
+    // Repair a misspelled function opener and a parameter repeated with an identical value.
+    bool repair_markup = false;
 };
 
 struct ParsedToolCallOutput {
@@ -60,7 +62,8 @@ struct ParsedToolCallOutput {
 };
 
 [[nodiscard]] std::shared_ptr<const ToolCallOutputContract>
-build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled);
+build_tool_call_output_contract(std::span<const std::string> tool_jsons, bool enabled,
+                                bool repair_markup);
 
 [[nodiscard]] ParsedToolCallOutput
 parse_qwen_tool_call_output(const std::string& text, std::size_t max_tool_name_length,

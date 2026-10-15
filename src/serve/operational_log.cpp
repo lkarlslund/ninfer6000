@@ -293,17 +293,23 @@ OperationalRecord render_request_done(const RequestLogContext& context,
     return {.severity = OperationalSeverity::Info, .message = out.str()};
 }
 
-std::optional<OperationalRecord> render_tool_call_fallback(const RequestLogContext& context,
-                                                           const GenerationOutcome& outcome) {
-    const ninfer::ToolCallParseFallbackReason reason = outcome.tool_call_parse.fallback_reason;
-    if (!outcome.tool_call_parse.marker_seen ||
-        reason == ninfer::ToolCallParseFallbackReason::None) {
-        return std::nullopt;
+std::optional<OperationalRecord> render_tool_call_markup(const RequestLogContext& context,
+                                                         const GenerationOutcome& outcome) {
+    const ninfer::ToolCallParseDiagnostics& parse = outcome.tool_call_parse;
+    if (!parse.marker_seen) { return std::nullopt; }
+    if (parse.fallback_reason != ninfer::ToolCallParseFallbackReason::None) {
+        return OperationalRecord{
+            .severity = OperationalSeverity::Warning,
+            .message =
+                "req#" + std::to_string(context.id) + " tool markup returned as text | " +
+                pretty_code(ninfer::tool_call_parse_fallback_reason_name(parse.fallback_reason)),
+        };
     }
+    if (parse.repaired_markup == 0) { return std::nullopt; }
     return OperationalRecord{
-        .severity = OperationalSeverity::Warning,
-        .message  = "req#" + std::to_string(context.id) + " tool markup returned as text | " +
-                   pretty_code(ninfer::tool_call_parse_fallback_reason_name(reason)),
+        .severity = OperationalSeverity::Info,
+        .message  = "req#" + std::to_string(context.id) + " tool markup repaired | " +
+                    product::format_pretty_count(parse.repaired_markup),
     };
 }
 
@@ -411,8 +417,8 @@ void OperationalLog::request_rejected(const RequestRejectionLogContext& context)
 void OperationalLog::request_done(const RequestLogContext& context,
                                   const GenerationOutcome& outcome) const {
     write(render_request_done(context, outcome));
-    if (std::optional<OperationalRecord> fallback = render_tool_call_fallback(context, outcome)) {
-        write(std::move(*fallback));
+    if (std::optional<OperationalRecord> markup = render_tool_call_markup(context, outcome)) {
+        write(std::move(*markup));
     }
 }
 

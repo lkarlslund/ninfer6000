@@ -514,8 +514,20 @@ int main() {
                     .at("schema_mismatch_arguments") == 2 &&
             normalized_tool_done.at("result").at("tool_call_parse").at("fallback_reason") ==
                 "none" &&
-            !render_tool_call_fallback(context, normalized_tool_outcome),
+            !render_tool_call_markup(context, normalized_tool_outcome),
         "successful tool-call normalization diagnostics are incomplete or noisy");
+
+    GenerationOutcome repaired_outcome               = normalized_tool_outcome;
+    repaired_outcome.tool_call_parse.repaired_markup = 2;
+    const Json repaired_done =
+        Json::parse(format_request_done_json("serve-test", 3004, context, repaired_outcome));
+    const std::optional<OperationalRecord> repaired_record =
+        render_tool_call_markup(context, repaired_outcome);
+    failures += check(repaired_done.at("result").at("tool_call_parse").at("repaired_markup") == 2 &&
+                          repaired_record &&
+                          repaired_record->severity == OperationalSeverity::Info &&
+                          repaired_record->message == "req#7 tool markup repaired | 2",
+                      "repaired tool markup diagnostics are absent");
 
     GenerationOutcome fallback_outcome = outcome;
     fallback_outcome.tool_call_parse   = {
@@ -532,7 +544,7 @@ int main() {
                               "duplicate_parameter",
                       "tool-call text fallback diagnostics missing from JSONL");
     const std::optional<OperationalRecord> fallback_warning =
-        render_tool_call_fallback(context, fallback_outcome);
+        render_tool_call_markup(context, fallback_outcome);
     failures += check(
         fallback_warning && fallback_warning->severity == OperationalSeverity::Warning &&
             fallback_warning->message == "req#7 tool markup returned as text | duplicate parameter",
