@@ -522,7 +522,11 @@ void TextContext::mtp_forward_flash_next(const Tensor& ids, const Tensor& hidden
 
     Tensor cache_positions = positions.view({width, batch});
     Tensor mrope_positions;
-    if (rope_positions.ne[2] == 3 || rope_positions.ne[1] == 3) {
+    // The tensor already carries the three MRoPE sections only when its element count is
+    // width * batch * 3; ne[1] == 3 also matches a plain {width, 3} tensor (batch 3).
+    const bool rope_is_mrope =
+        rope_positions.numel() == static_cast<std::int64_t>(width) * batch * 3;
+    if (rope_is_mrope) {
         mrope_positions = rope_positions.view({width, batch, 3});
     } else {
         mrope_positions = work_.alloc(DType::I32, {width, batch, 3});
