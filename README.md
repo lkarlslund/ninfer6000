@@ -1,5 +1,14 @@
 # NInfer 6000
 
+> [!CAUTION]
+> ## ⚠️ Deprecated: use [quench6k](https://github.com/lkarlslund/quench6k) instead
+>
+> NInfer 6000 is no longer maintained. Its successor,
+> **[quench6k](https://github.com/lkarlslund/quench6k)**, runs the same model on the same GPU and is
+> faster: decode, MTP decode and prefill are all quicker at every context length measured.
+> See its [benchmarks](https://github.com/lkarlslund/quench6k/blob/main/BENCHMARK.md), which include
+> NInfer 6000 measured on the same machine.
+
 NInfer 6000 runs Qwen3.8 Flash-Next 125B-A6B on one NVIDIA RTX PRO 6000 Blackwell GPU.
 
 It is a fork of [NInfer](https://github.com/Neroued/ninfer), a C++/CUDA inference engine for
